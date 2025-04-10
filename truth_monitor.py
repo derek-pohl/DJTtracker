@@ -19,7 +19,7 @@ load_dotenv()
 # Requires browser binaries: python -m playwright install
 
 # Get configuration from environment variables
-API_URL = os.environ.get("API_URL", "https://truthsocial.com/api/v1/accounts/114311127114777163/statuses?exclude_replies=true&with_muted=true")
+API_URL = os.environ.get("API_URL", "https://truthsocial.com/api/v1/accounts/107780257626128497/statuses?exclude_replies=true&with_muted=true")
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", 10)) # Convert to int
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
