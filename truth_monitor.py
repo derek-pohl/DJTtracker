@@ -90,9 +90,11 @@ GEMINI_PROMPT_TEMPLATE = """
 *   **Tweet:** "Just spoke with Tim Cook. Apple is a great American company!"
     *   **Response:** `[Apple][AAPL][MENTIONED][The tweet mentions Apple positively but doesn't indicate specific policy or market action affecting its stock price.]`
 
+{focus_section}
+
 **Tweet to Analyze:**
 
-{focus_section}"{tweet_content}"
+"{tweet_content}"
 """
 
 # Store the ID of the latest post seen
@@ -169,7 +171,8 @@ def format_gemini_for_email(gemini_response_text):
         formatted_analysis = "\n".join(formatted_lines)
 
 
-    return f"{formatted_analysis}\n{justification}"
+    # Add an extra newline between analysis and justification
+    return f"{formatted_analysis}\n\n{justification}"
 
 
 def send_email(subject, body, to_email, from_email, app_password):
