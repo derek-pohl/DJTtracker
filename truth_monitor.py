@@ -3,6 +3,8 @@ import re
 import html
 import json
 import os  # Added for environment variables
+import smtplib # Added for email
+from email.message import EmailMessage # Added for email
 from datetime import datetime
 from dotenv import load_dotenv  # Added for .env file
 import google.generativeai as genai # Added for Gemini
@@ -20,15 +22,30 @@ load_dotenv()
 API_URL = os.environ.get("API_URL", "https://truthsocial.com/api/v1/accounts/114311127114777163/statuses?exclude_replies=true&with_muted=true")
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", 10)) # Convert to int
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
+SENDER_APP_PASSWORD = os.environ.get("SENDER_APP_PASSWORD")
+RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL")
 
+# --- Validation ---
 if not GEMINI_API_KEY:
     print("Error: GEMINI_API_KEY not found in environment variables or .env file.")
-    exit(1) # Exit if API key is missing
+    exit(1)
+if not SENDER_EMAIL:
+    print("Error: SENDER_EMAIL not found in environment variables or .env file.")
+    exit(1)
+if not SENDER_APP_PASSWORD:
+    print("Error: SENDER_APP_PASSWORD not found in environment variables or .env file.")
+    exit(1)
+if not RECIPIENT_EMAIL:
+    print("Error: RECIPIENT_EMAIL not found in environment variables or .env file.")
+    exit(1)
+# --- End Validation ---
+
 
 # Configure Gemini client
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    gemini_client = genai.GenerativeModel('gemini-1.5-flash') # Use the model directly
+    gemini_client = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
 except Exception as e:
     print(f"Error configuring Gemini client: {e}")
     exit(1)
@@ -78,9 +95,73 @@ latest_seen_post_id = None
 
 def clean_html(raw_html):
     """Removes HTML tags and decodes HTML entities."""
-    clean_text = re.sub(r'<[^>]+>', '', raw_html)
-    clean_text = html.unescape(clean_text)
+    # Decode HTML entities first
+    clean_text = html.unescape(raw_html)
+    # Remove all HTML tags
+    clean_text = re.sub(r'<[^>]+>', '', clean_text)
+    # Strip leading/trailing whitespace and return
     return clean_text.strip()
+
+def format_gemini_for_email(gemini_response_text):
+    """Formats the raw Gemini response string for email, removing labels."""
+    if not gemini_response_text or not isinstance(gemini_response_text, str):
+        return "Invalid Gemini response received."
+
+    # Find all bracketed sections
+    parts = re.findall(r'\[(.*?)\]', gemini_response_text)
+    if not parts:
+        return gemini_response_text # Return raw if no brackets found
+
+    justification = parts[-1] # Last part is justification
+    analysis_parts = parts[:-1] # All other parts are analysis
+
+    if not analysis_parts: # Only justification found?
+        return justification
+
+    if analysis_parts[0].upper() == 'NONE':
+        formatted_analysis = "NONE"
+    else:
+        # Process analysis parts (Entity, Ticker/Sector, Impact)
+        formatted_lines = []
+        # Iterate in steps of 3 if possible, otherwise just join
+        if len(analysis_parts) % 3 == 0:
+            for i in range(0, len(analysis_parts), 3):
+                entity = analysis_parts[i]
+                ticker_sector = analysis_parts[i+1]
+                impact = analysis_parts[i+2]
+                # Include ticker/sector if it's different from entity
+                detail = f" ({ticker_sector})" if ticker_sector and ticker_sector != entity else ""
+                formatted_lines.append(f"{entity}{detail}: {impact}")
+            formatted_analysis = "\n".join(formatted_lines)
+        else: # Fallback if format is unexpected
+             formatted_analysis = " ".join([f"[{p}]" for p in analysis_parts])
+
+
+    return f"{formatted_analysis}\n{justification}"
+
+
+def send_email(subject, body, to_email, from_email, app_password):
+    """Sends an email using Gmail SMTP."""
+    msg = EmailMessage()
+    msg.set_content(body)
+    msg['Subject'] = subject
+    msg['From'] = from_email
+    msg['To'] = to_email
+
+    try:
+        print(f"[{datetime.now()}] Attempting to send email to {to_email}...")
+        # Connect to Gmail SMTP server
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()  # Secure the connection
+        server.login(from_email, app_password)
+        server.send_message(msg)
+        server.quit()
+        print(f"[{datetime.now()}] Email sent successfully.")
+    except smtplib.SMTPAuthenticationError:
+        print(f"[{datetime.now()}] Email Error: Authentication failed. Check SENDER_EMAIL and SENDER_APP_PASSWORD.")
+    except Exception as e:
+        print(f"[{datetime.now()}] Email Error: Failed to send email: {e}")
+
 
 def fetch_latest_posts_playwright(page: Page):
     """Navigates to the API URL and attempts to parse the displayed JSON."""
@@ -182,20 +263,31 @@ def run_monitor(playwright: Playwright):
                                 else:
                                     print("[Post has no text content or media]")
 
-                            # --- Gemini Analysis ---
+                            # --- Gemini Analysis & Email ---
                             if cleaned_content:
+                                print("--- Analyzing with Gemini ---")
+                                gemini_response_text = None # Initialize
                                 try:
-                                    print("--- Analyzing with Gemini ---")
                                     final_prompt = GEMINI_PROMPT_TEMPLATE.format(tweet_content=cleaned_content)
-                                    # Use generate_content directly from the model instance
                                     response = gemini_client.generate_content(contents=[final_prompt])
-                                    print(f"Gemini Response: {response.text}")
+                                    gemini_response_text = response.text
+                                    print(f"Gemini Response: {gemini_response_text}")
                                 except Exception as gemini_error:
                                     print(f"Error calling Gemini API: {gemini_error}")
-                                print("-----------------------------")
-                            # --- End Gemini Analysis ---
+                                print("-----------------------------") # Separator after Gemini attempt
 
-                            print("------------------------------------------") # Original separator
+                                # --- Send Email ---
+                                if gemini_response_text:
+                                    formatted_gemini = format_gemini_for_email(gemini_response_text)
+                                    email_subject = "New Truth Social Post"
+                                    email_body = f"{cleaned_content}\n\n{formatted_gemini}" # Use the cleaned content
+                                    send_email(email_subject, email_body, RECIPIENT_EMAIL, SENDER_EMAIL, SENDER_APP_PASSWORD)
+                                else:
+                                    print(f"[{datetime.now()}] Skipping email due to Gemini error.")
+                                # --- End Send Email ---
+
+                            # --- End Gemini Analysis & Email --- (Keep original separator for console clarity)
+                            print("------------------------------------------")
 
                         latest_seen_post_id = current_latest_id
 
