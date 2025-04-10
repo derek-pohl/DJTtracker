@@ -25,6 +25,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
 SENDER_APP_PASSWORD = os.environ.get("SENDER_APP_PASSWORD")
 RECIPIENT_EMAIL = os.environ.get("RECIPIENT_EMAIL")
+FOCUS = os.environ.get("FOCUS") # Load FOCUS
+# Load NOTIFY_ALL and convert to boolean, default to False if not set or invalid
+NOTIFY_ALL_STR = os.environ.get("NOTIFY_ALL", "False")
+NOTIFY_ALL = NOTIFY_ALL_STR.strip().lower() == 'true'
+
 
 # --- Validation ---
 if not GEMINI_API_KEY:
@@ -87,7 +92,7 @@ GEMINI_PROMPT_TEMPLATE = """
 
 **Tweet to Analyze:**
 
-"{tweet_content}"
+{focus_section}"{tweet_content}"
 """
 
 # Store the ID of the latest post seen
@@ -121,20 +126,47 @@ def format_gemini_for_email(gemini_response_text):
     if analysis_parts[0].upper() == 'NONE':
         formatted_analysis = "NONE"
     else:
-        # Process analysis parts (Entity, Ticker/Sector, Impact)
+        # Process analysis parts (Entity, Ticker/Sector, Impact) - Handles 2 or 3 parts per entity
         formatted_lines = []
-        # Iterate in steps of 3 if possible, otherwise just join
-        if len(analysis_parts) % 3 == 0:
-            for i in range(0, len(analysis_parts), 3):
-                entity = analysis_parts[i]
+        i = 0
+        while i < len(analysis_parts):
+            entity = analysis_parts[i]
+            ticker_sector = "" # Default to empty
+            impact_text = ""
+            impact_display = ""
+            detail = ""
+
+            # Check for 3-item sequence first (Entity, Ticker/Sector, Impact)
+            if i + 2 < len(analysis_parts) and analysis_parts[i+2].upper() in ['UP', 'DOWN', 'MENTIONED']:
                 ticker_sector = analysis_parts[i+1]
-                impact = analysis_parts[i+2]
-                # Include ticker/sector if it's different from entity
-                detail = f" ({ticker_sector})" if ticker_sector and ticker_sector != entity else ""
-                formatted_lines.append(f"{entity}{detail}: {impact}")
-            formatted_analysis = "\n".join(formatted_lines)
-        else: # Fallback if format is unexpected
-             formatted_analysis = " ".join([f"[{p}]" for p in analysis_parts])
+                impact_text = analysis_parts[i+2].upper()
+                i += 3 # Move index forward by 3
+            # Check for 2-item sequence (Entity, Impact)
+            elif i + 1 < len(analysis_parts) and analysis_parts[i+1].upper() in ['UP', 'DOWN', 'MENTIONED']:
+                impact_text = analysis_parts[i+1].upper()
+                i += 2 # Move index forward by 2
+            else:
+                # Unexpected format, just append the entity and move on
+                formatted_lines.append(f"[{entity}]") # Fallback for unexpected item
+                i += 1
+                continue # Skip emoji mapping for this item
+
+            # Map impact text to emoji
+            if impact_text == 'UP':
+                impact_display = '📈'
+            elif impact_text == 'DOWN':
+                impact_display = '📉'
+            elif impact_text == 'MENTIONED':
+                impact_display = '💬'
+            else: # Should not happen based on checks above, but keep as fallback
+                impact_display = impact_text
+
+            # Include ticker/sector if it exists and is different from entity
+            detail = f" ({ticker_sector})" if ticker_sector and ticker_sector != entity else ""
+            # Construct the new output format
+            formatted_lines.append(f"{entity}{detail}: {impact_display}")
+
+        formatted_analysis = "\n".join(formatted_lines)
 
 
     return f"{formatted_analysis}\n{justification}"
@@ -268,25 +300,42 @@ def run_monitor(playwright: Playwright):
                                 print("--- Analyzing with Gemini ---")
                                 gemini_response_text = None # Initialize
                                 try:
-                                    final_prompt = GEMINI_PROMPT_TEMPLATE.format(tweet_content=cleaned_content)
+                                    # Conditionally add focus section to the prompt
+                                    focus_section_text = ""
+                                    if FOCUS:
+                                        focus_section_text = f"Focus on: {FOCUS}. Also consider the broader market.\n\n"
+
+                                    final_prompt = GEMINI_PROMPT_TEMPLATE.format(
+                                        focus_section=focus_section_text,
+                                        tweet_content=cleaned_content
+                                    )
                                     response = gemini_client.generate_content(contents=[final_prompt])
-                                    gemini_response_text = response.text
+                                    gemini_response_text = response.text.strip() # Strip whitespace
                                     print(f"Gemini Response: {gemini_response_text}")
                                 except Exception as gemini_error:
                                     print(f"Error calling Gemini API: {gemini_error}")
                                 print("-----------------------------") # Separator after Gemini attempt
 
-                                # --- Send Email ---
+                                # --- Send Email Logic ---
+                                should_send_email = False
                                 if gemini_response_text:
-                                    formatted_gemini = format_gemini_for_email(gemini_response_text)
-                                    email_subject = "New Truth Social Post"
-                                    email_body = f"{cleaned_content}\n\n{formatted_gemini}" # Use the cleaned content
-                                    send_email(email_subject, email_body, RECIPIENT_EMAIL, SENDER_EMAIL, SENDER_APP_PASSWORD)
-                                else:
-                                    print(f"[{datetime.now()}] Skipping email due to Gemini error.")
-                                # --- End Send Email ---
+                                    # Check if NOTIFY_ALL is True OR if Gemini response is not '[NONE]'
+                                    if NOTIFY_ALL or not gemini_response_text.startswith("[NONE]"):
+                                        should_send_email = True
+                                    else:
+                                         print(f"[{datetime.now()}] Skipping email: NOTIFY_ALL is False and Gemini response is '[NONE]'.")
 
-                            # --- End Gemini Analysis & Email --- (Keep original separator for console clarity)
+                                    if should_send_email:
+                                        formatted_gemini = format_gemini_for_email(gemini_response_text)
+                                        email_subject = "New Truth Social Post"
+                                        email_body = f"{cleaned_content}\n\n{formatted_gemini}" # Use the cleaned content
+                                        send_email(email_subject, email_body, RECIPIENT_EMAIL, SENDER_EMAIL, SENDER_APP_PASSWORD)
+
+                                else:
+                                    print(f"[{datetime.now()}] Skipping email due to Gemini error or empty response.")
+                                # --- End Send Email Logic ---
+
+                            # --- End Gemini Analysis & Email ---
                             print("------------------------------------------")
 
                         latest_seen_post_id = current_latest_id
