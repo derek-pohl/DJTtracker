@@ -44,8 +44,6 @@ if not SENDER_APP_PASSWORD:
 if not RECIPIENT_EMAIL:
     print("Error: RECIPIENT_EMAIL not found in environment variables or .env file.")
     exit(1)
-# --- End Validation ---
-
 
 # Configure Gemini client
 try:
